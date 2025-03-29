@@ -1,0 +1,6 @@
+[wrap-file]
+directory = gstreamer-1.26.0
+
+source_url = https://gitlab.freedesktop.org/gstreamer/gstreamer/-/archive/1.26.0/gstreamer-1.26.0.tar.bz2
+source_filename = gstreamer-1.26.0.tar.bz2
+source_hash = a0fa96f7fa7fc4d37db08c5a8a2007ef3baf7cc554ba54e9165bd37099182916
