@@ -18,16 +18,20 @@
 # along with obs-gstreamer. If not, see <http://www.gnu.org/licenses/>.
 #
 
-project('obs-gstreamer', 'c',
-  default_options : [
+project(
+  'obs-gstreamer',
+  'c',
+  default_options: [
     'prefix=~/.config/obs-studio/plugins/obs-gstreamer/bin/64bit',
-    'libdir='
+    'libdir=',
+    'gobject-introspection:cairo=disabled',
+    'glib:introspection=disabled',
   ],
 )
 
-obs_dep = dependency('libobs', required : false)
+obs_dep = dependency('libobs', required: false)
 if not obs_dep.found()
-  obs_dep = meson.get_compiler('c').find_library('obs', has_headers : 'obs/obs.h')
+  obs_dep = meson.get_compiler('c').find_library('obs', has_headers: 'obs/obs.h')
 endif
 
 name_suffix = []
@@ -35,26 +39,38 @@ if host_machine.system() == 'darwin'
   name_suffix = 'so'
 endif
 
-shared_library('obs-gstreamer',
+shared_library(
+  'obs-gstreamer',
   'gstreamer.c',
   'gstreamer-source.c',
   'gstreamer-encoder.c',
   'gstreamer-filter.c',
   'gstreamer-output.c',
   vcs_tag(
-    command : ['git', 'rev-parse', '--short', 'HEAD'],
-    input : 'version.c.in',
-    output : 'version.c',
+    command: ['git', 'rev-parse', '--short', 'HEAD'],
+    input: 'version.c.in',
+    output: 'version.c',
   ),
-  name_prefix : '',
-  name_suffix : name_suffix,
-  dependencies : [
-    obs_dep,
-    dependency('gstreamer-1.0', version : '>=1.16.0'),
+  name_prefix: '',
+  name_suffix: name_suffix,
+  dependencies: [
+    dependency(
+      'gstreamer-1.0',
+      version: '>=1.16.0',
+      default_options: [
+        'base=disabled',
+        'good=disabled',
+        'bad=disabled',
+        'ugly=disabled',
+        'libav=disabled',
+        'introspection=disabled',
+        'python=disabled',
+      ],
+    ),
     dependency('gstreamer-video-1.0'),
     dependency('gstreamer-audio-1.0'),
     dependency('gstreamer-app-1.0'),
     dependency('gstreamer-net-1.0'),
   ],
-  install : true,
+  install: true,
 )
