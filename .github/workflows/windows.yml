@@ -77,7 +77,9 @@ jobs:
             -w /src \
             obs-gstreamer-windows-build \
             bash -lc '
-              test -f /obs-studio-${OBS_VERSION}/bin/64bit/obs64.exe
+              test -f /bin/64bit/obs64.exe || \
+                test -f /obs-studio-${OBS_VERSION}/bin/64bit/obs64.exe || \
+                test -f /obs64.exe
               test -f windows/obs-gstreamer.dll
               GST_PLUGIN_PATH=/c/gstreamer/1.0/mingw_x86_64/lib/gstreamer-1.0 \
                 wine /c/gstreamer/1.0/mingw_x86_64/bin/gst-inspect-1.0.exe appsink
