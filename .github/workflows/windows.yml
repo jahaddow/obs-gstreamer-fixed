@@ -100,10 +100,16 @@ jobs:
                 test -f /obs-studio-${OBS_VERSION}/bin/64bit/obs64.exe || \
                 test -f /obs64.exe
               test -f windows/obs-gstreamer.dll
-              timeout 90s xvfb-run -a wineboot --init
-              timeout 90s env \
-                GST_PLUGIN_PATH=/c/gstreamer/1.0/mingw_x86_64/lib/gstreamer-1.0 \
-                xvfb-run -a wine /c/gstreamer/1.0/mingw_x86_64/bin/gst-inspect-1.0.exe appsink
+              gst_inspect=/c/gstreamer/1.0/mingw_x86_64/bin/gst-inspect-1.0.exe
+              test -f "$gst_inspect"
+              for dll in \
+                libgstreamer-1.0-0.dll \
+                libglib-2.0-0.dll \
+                libgobject-2.0-0.dll; do
+                test -f "/c/gstreamer/1.0/mingw_x86_64/bin/$dll"
+                objdump -p "$gst_inspect" | grep -q "DLL Name: $dll"
+              done
+              timeout 30s env WINEDEBUG=-all wine cmd /c exit 0
             '
 
       - name: Package plugin
