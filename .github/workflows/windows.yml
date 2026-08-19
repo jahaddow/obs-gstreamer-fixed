@@ -67,7 +67,15 @@ jobs:
       - name: Verify Windows imports
         run: |
           objdump -p windows/obs-gstreamer.dll | tee windows-imports.txt
-          ! grep -E 'DLL Name: (libgstreamer|libglib|libgobject|libgst)' windows-imports.txt
+          normal_imports=$(awk '/The Import Tables/ {in_import=1} /The Delay Import/ {in_import=0} in_import' windows-imports.txt)
+          if grep -Eq 'DLL Name: (libgstreamer|libglib|libgobject|libgst)' <<<"$normal_imports"; then
+            echo "GStreamer/GLib DLL found in the normal import table" >&2
+            exit 1
+          fi
+          delay_imports=$(awk '/The Delay Import/ {in_delay=1} in_delay' windows-imports.txt)
+          for dll in libgstreamer-1.0-0.dll libglib-2.0-0.dll libgobject-2.0-0.dll; do
+            grep -q "DLL Name: $dll" <<<"$delay_imports"
+          done
 
       - name: GStreamer and OBS runtime smoke test
         run: |
