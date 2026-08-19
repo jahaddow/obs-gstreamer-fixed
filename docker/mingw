@@ -1,8 +1,11 @@
 FROM debian:bookworm
 
 RUN apt-get update \
- && apt-get install -y git meson mingw-w64 mingw-w64-tools ninja-build unzip wget wine curl \
+ && apt-get install -y git meson mingw-w64 mingw-w64-tools ninja-build unzip wget wine xvfb curl \
  && rm -rf /var/lib/apt/lists/*
+
+ENV WINEARCH=win64 \
+    WINEDEBUG=-all
 
 ARG OBS_VERSION=32.2.2
 ARG GSTREAMER_VERSION=1.26.11
@@ -17,8 +20,9 @@ RUN wget https://github.com/obsproject/obs-studio/releases/download/${OBS_VERSIO
 
 RUN wget https://gstreamer.freedesktop.org/data/pkg/windows/${GSTREAMER_VERSION}/mingw/gstreamer-1.0-devel-mingw-x86_64-${GSTREAMER_VERSION}.msi \
  && wget https://gstreamer.freedesktop.org/data/pkg/windows/${GSTREAMER_VERSION}/mingw/gstreamer-1.0-mingw-x86_64-${GSTREAMER_VERSION}.msi \
- && msiexec -passive -i gstreamer-1.0-mingw-x86_64-${GSTREAMER_VERSION}.msi \
- && msiexec -passive -i gstreamer-1.0-devel-mingw-x86_64-${GSTREAMER_VERSION}.msi \
+ && xvfb-run -a wineboot --init \
+ && xvfb-run -a wine msiexec /i gstreamer-1.0-mingw-x86_64-${GSTREAMER_VERSION}.msi /qn \
+ && xvfb-run -a wine msiexec /i gstreamer-1.0-devel-mingw-x86_64-${GSTREAMER_VERSION}.msi /qn \
  && ln -s ~/.wine/drive_c/ /c \
  && rm gstreamer-1.0-mingw-x86_64-${GSTREAMER_VERSION}.msi \
  && rm gstreamer-1.0-devel-mingw-x86_64-${GSTREAMER_VERSION}.msi \
