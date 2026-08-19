@@ -342,13 +342,17 @@ static void output_audio_locked(steady_clock_t *clock, uint64_t now_ns)
 			    STEADY_MAX_LAG_MS * 1000000ULL &&
 		    !clock->stall_reanchored) {
 			clock->stats.clock_reanchors++;
-			clock->output_anchor_ns = now_ns +
-				(uint64_t)STEADY_OUTPUT_LEAD_MS * 1000000ULL;
-			clock->output_samples = 0;
-			clock->next_audio_ns = clock->output_anchor_ns;
+			/* Keep the timestamp sequence already exposed to OBS continuous.
+			 * Moving next_audio_ns to now after a stall creates exactly the
+			 * multi-second TS_SMOOTHING_THRESHOLD warnings OBS reports and
+			 * causes the audio/video mixer to stutter. Re-anchor only the input
+			 * media mapping; silence continues on the existing output clock. */
+			clock->output_anchor_ns = clock->next_audio_ns;
 			clock->latest_input_audio_end_ns = 0;
 			clock->latest_output_audio_end_ns = 0;
 			clock->video_anchor_valid = false;
+			clock->playout_anchor_valid = false;
+			clock->playout_input_anchor_pts_ns = 0;
 			clock->stall_reanchored = true;
 		}
 	}
