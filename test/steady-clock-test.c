@@ -241,6 +241,41 @@ static void test_discontinuous_audio_reprime(void)
 	g_mutex_clear(&capture.mutex);
 }
 
+static void test_small_audio_overlap_does_not_reset_output(void)
+{
+	struct capture capture = {0};
+	g_mutex_init(&capture.mutex);
+	capture.timestamps = g_array_new(FALSE, FALSE, sizeof(uint64_t));
+	capture.video_timestamps = g_array_new(FALSE, FALSE, sizeof(uint64_t));
+	struct steady_clock_callbacks callbacks = {
+		.audio = capture_audio,
+		.video = capture_video,
+	};
+	steady_clock_t *clock = steady_clock_create(&capture, &callbacks, 48000,
+							50, true);
+	g_assert_nonnull(clock);
+	steady_clock_start(clock);
+	push_audio(clock, 0.25f, 0);
+	push_audio(clock, 0.25f, 20000000);
+	push_audio(clock, 0.25f, 36000000);
+	push_audio(clock, 0.25f, 56000000);
+	push_audio(clock, 0.25f, 76000000);
+	push_audio(clock, 0.25f, 96000000);
+	push_audio(clock, 0.25f, 116000000);
+	push_audio(clock, 0.25f, 136000000);
+	g_usleep(250000);
+
+	struct steady_clock_stats stats = {0};
+	steady_clock_get_stats(clock, &stats);
+	g_assert_true(stats.primed);
+	g_assert_cmpint(stats.clock_reanchors, ==, 0);
+
+	steady_clock_destroy(clock);
+	g_array_free(capture.timestamps, TRUE);
+	g_array_free(capture.video_timestamps, TRUE);
+	g_mutex_clear(&capture.mutex);
+}
+
 int main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -250,5 +285,6 @@ int main(int argc, char **argv)
 	g_test_add_func("/steady-clock/video-follows-audio-clock", test_video_follows_audio_clock);
 	g_test_add_func("/steady-clock/underrun-reanchors-once", test_underrun_reanchors_once);
 	g_test_add_func("/steady-clock/discontinuous-audio-reprime", test_discontinuous_audio_reprime);
+	g_test_add_func("/steady-clock/small-audio-overlap", test_small_audio_overlap_does_not_reset_output);
 	return g_test_run();
 }

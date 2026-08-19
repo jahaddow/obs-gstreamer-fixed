@@ -25,6 +25,7 @@
 #define STEADY_MAX_VIDEO_QUEUE 8
 #define STEADY_MAX_LAG_MS 1500
 #define STEADY_PTS_RESET_MS 2000
+#define STEADY_PTS_BACKWARD_TOLERANCE_MS 100
 #define STEADY_SILENCE_FADE_MS 5
 #define STEADY_VIDEO_INTERVAL_NS 16666667ULL
 #define STEADY_VIDEO_LATE_TOLERANCE_NS 100000000ULL
@@ -662,9 +663,14 @@ bool steady_clock_push_audio(steady_clock_t *clock, const float *samples,
 	clock->audio_channels = channels;
 	uint64_t now_ns = monotonic_ns();
 
-	if (clock->last_input_pts_ns != 0 &&
-	    (pts_ns < clock->last_input_pts_ns ||
-	     pts_ns - clock->last_input_pts_ns > STEADY_PTS_RESET_MS * 1000000ULL)) {
+	uint64_t input_end_ns = pts_ns + frames_to_ns(frames, sample_rate);
+	bool input_rewind = clock->last_input_pts_ns > pts_ns &&
+		clock->last_input_pts_ns - pts_ns >
+			STEADY_PTS_BACKWARD_TOLERANCE_MS * 1000000ULL;
+	bool input_gap = pts_ns > clock->last_input_pts_ns &&
+		pts_ns - clock->last_input_pts_ns >
+			STEADY_PTS_RESET_MS * 1000000ULL;
+	if (clock->last_input_pts_ns != 0 && (input_rewind || input_gap)) {
 		input_discontinuity = true;
 		previous_pts_ns = clock->last_input_pts_ns;
 		clear_queues_locked(clock);
@@ -688,7 +694,10 @@ bool steady_clock_push_audio(steady_clock_t *clock, const float *samples,
 	}
 	clock->last_audio_push_system_ns = now_ns;
 	clock->stall_reanchored = false;
-	clock->last_input_pts_ns = pts_ns + frames_to_ns(frames, sample_rate);
+	/* Audio buffers can overlap slightly or arrive with a small backwards PTS
+	 * adjustment. Keep the furthest observed end of the input timeline so that
+	 * this normal jitter does not repeatedly reset audio and video. */
+	clock->last_input_pts_ns = MAX(clock->last_input_pts_ns, input_end_ns);
 	g_queue_push_tail(clock->audio, chunk);
 	clock->audio_frames += frames;
 
