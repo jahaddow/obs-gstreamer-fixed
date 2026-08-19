@@ -153,6 +153,12 @@ static void clear_audio_queue_locked(steady_clock_t *clock)
 	clock->audio_frames = 0;
 }
 
+static void clear_video_queue_locked(steady_clock_t *clock)
+{
+	while (!g_queue_is_empty(clock->video))
+		free_video_frame(g_queue_pop_head(clock->video));
+}
+
 static void reset_resampler_locked(steady_clock_t *clock)
 {
 	if (clock->resampler)
@@ -359,6 +365,9 @@ static void output_audio_locked(steady_clock_t *clock, uint64_t now_ns)
 			clock->output_anchor_ns = clock->next_audio_ns;
 			clock->latest_input_audio_end_ns = 0;
 			clock->latest_output_audio_end_ns = 0;
+			/* Frames queued before a long audio stall belong to the old
+			 * playout epoch. Do not replay one after the clock re-anchors. */
+			clear_video_queue_locked(clock);
 			clock->video_anchor_valid = false;
 			clock->playout_anchor_valid = false;
 			clock->playout_input_anchor_pts_ns = 0;
