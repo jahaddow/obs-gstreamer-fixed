@@ -7,5 +7,6 @@
 /test-build*/
 /build-local/
 /package/
+/.ci-cache/
 /obs-gstreamer-windows-x64.*
 /windows-imports.txt

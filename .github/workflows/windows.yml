@@ -42,15 +42,25 @@ jobs:
   windows-build:
     name: Windows x64 plugin
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: timing-tests
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Cache GStreamer packages
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/gstreamer
+          key: gstreamer-mingw-x86_64-${{ env.GSTREAMER_VERSION }}
+
+      - name: Download GStreamer packages
+        run: bash docker/download-windows-deps.sh "$GSTREAMER_VERSION"
+
       - name: Build Windows toolchain image
         run: |
-          docker build \
+          timeout 30m docker build \
             --build-arg OBS_VERSION="$OBS_VERSION" \
             --build-arg GSTREAMER_VERSION="$GSTREAMER_VERSION" \
             -f docker/mingw \
@@ -72,10 +82,11 @@ jobs:
             echo "GStreamer/GLib DLL found in the normal import table" >&2
             exit 1
           fi
-          delay_imports=$(awk '/The Delay Import/ {in_delay=1} in_delay' windows-imports.txt)
-          for dll in libgstreamer-1.0-0.dll libglib-2.0-0.dll libgobject-2.0-0.dll; do
-            grep -q "DLL Name: $dll" <<<"$delay_imports"
+          delay_symbols=$(nm windows/obs-gstreamer.dll)
+          for component in gstreamer glib gobject; do
+            grep -q "__DELAY_IMPORT_DESCRIPTOR_.*lib${component}" <<<"$delay_symbols"
           done
+          grep -q '__delayLoadHelper2' <<<"$delay_symbols"
 
       - name: GStreamer and OBS runtime smoke test
         run: |
@@ -89,8 +100,10 @@ jobs:
                 test -f /obs-studio-${OBS_VERSION}/bin/64bit/obs64.exe || \
                 test -f /obs64.exe
               test -f windows/obs-gstreamer.dll
-              GST_PLUGIN_PATH=/c/gstreamer/1.0/mingw_x86_64/lib/gstreamer-1.0 \
-                wine /c/gstreamer/1.0/mingw_x86_64/bin/gst-inspect-1.0.exe appsink
+              timeout 90s xvfb-run -a wineboot --init
+              timeout 90s env \
+                GST_PLUGIN_PATH=/c/gstreamer/1.0/mingw_x86_64/lib/gstreamer-1.0 \
+                xvfb-run -a wine /c/gstreamer/1.0/mingw_x86_64/bin/gst-inspect-1.0.exe appsink
             '
 
       - name: Package plugin

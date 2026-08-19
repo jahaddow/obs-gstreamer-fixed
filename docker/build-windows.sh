@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-export PKG_CONFIG_PATH=/c/gstreamer/1.0/x86_64/lib/pkgconfig/
+export PKG_CONFIG_PATH=/c/gstreamer/1.0/mingw_x86_64/lib/pkgconfig/
 export C_INCLUDE_PATH=/
 
 rm -f cross.txt
@@ -29,6 +29,6 @@ rm -rf gst-delayimp windows
 bash docker/gen-delayimp-libs.sh /c/gstreamer/1.0/mingw_x86_64/bin gst-delayimp
 
 meson setup windows --buildtype release --cross-file cross.txt \
-	-Dpkg_config_path=/c/gstreamer/1.0/x86_64/lib/pkgconfig/ \
+	-Dpkg_config_path=/c/gstreamer/1.0/mingw_x86_64/lib/pkgconfig/ \
 	-Dgst_delayimp_dir="$(pwd)/gst-delayimp"
 ninja -C windows

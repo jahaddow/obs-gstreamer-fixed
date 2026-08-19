@@ -1,0 +1,4 @@
+*
+!.ci-cache/
+!.ci-cache/gstreamer/
+!.ci-cache/gstreamer/*
