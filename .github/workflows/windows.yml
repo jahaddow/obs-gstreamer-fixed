@@ -118,7 +118,7 @@ jobs:
           cp windows/obs-gstreamer.dll package/obs-gstreamer/bin/64bit/
           cp README.md LICENSE package/obs-gstreamer/
           cp windows/obs-gstreamer.dll obs-gstreamer-windows-x64.dll
-          zip -r obs-gstreamer-windows-x64.zip package/obs-gstreamer
+          (cd package && zip -r ../obs-gstreamer-windows-x64.zip obs-gstreamer)
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

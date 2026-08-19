@@ -46,6 +46,24 @@ flatpak install com.obsproject.Studio.Plugin.Gstreamer
 [GStreamer run-time]: https://gstreamer.freedesktop.org/data/pkg/windows/
 [Macports]: https://www.macports.org/
 
+Windows installation
+---
+
+Install the official 64-bit MinGW GStreamer runtime first. Extract the Windows
+plugin ZIP into:
+
+    C:\ProgramData\obs-studio\plugins
+
+The resulting plugin path must be:
+
+    C:\ProgramData\obs-studio\plugins\obs-gstreamer\bin\64bit\obs-gstreamer.dll
+
+Restart OBS after installing it. Do not install the standalone DLL into the
+plugin manager or leave the ZIP's `package` directory in the path. Portable OBS
+uses its portable `plugins` directory instead. The runtime installer normally
+creates `GSTREAMER_1_0_ROOT_MINGW_X86_64`, which the plugin uses to locate the
+GStreamer `bin` and `lib\gstreamer-1.0` directories.
+
 Usage
 ---
 
