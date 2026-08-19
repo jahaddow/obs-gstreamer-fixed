@@ -366,6 +366,10 @@ static void output_audio_locked(steady_clock_t *clock, uint64_t now_ns)
 	 */
 	if (copied > 0 && !clock->playout_anchor_valid) {
 		clock->playout_input_anchor_pts_ns = input_pts_ns;
+		/* The input may have resumed after a stall while the output clock kept
+		 * advancing silence. Map the new media epoch to the current output
+		 * position, not to the instant the stall was detected. */
+		clock->output_anchor_ns = clock->next_audio_ns;
 		clock->playout_anchor_valid = true;
 	}
 
@@ -657,6 +661,7 @@ bool steady_clock_push_audio(steady_clock_t *clock, const float *samples,
 		else
 			clock->primed = false;
 		clock->playout_anchor_valid = false;
+		clock->last_input_pts_ns = 0;
 		clock->input_anchor_valid = false;
 	}
 	clock->audio_rate = sample_rate;
@@ -685,6 +690,10 @@ bool steady_clock_push_audio(steady_clock_t *clock, const float *samples,
 		clock->video_anchor_valid = false;
 		clock->playout_anchor_valid = false;
 		clock->next_video_ns = 0;
+		/* Start measuring the new media epoch from this buffer. Leaving the
+		 * previous end timestamp here would classify every following resumed
+		 * buffer as another discontinuity and repeatedly clear video. */
+		clock->last_input_pts_ns = input_end_ns;
 		clock->input_anchor_valid = false;
 	}
 	if (!clock->input_anchor_valid) {
