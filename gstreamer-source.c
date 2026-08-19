@@ -977,7 +977,9 @@ obs_properties_t *gstreamer_source_get_properties(void *data)
 	obs_property_set_long_description(
 		prop,
 		"Keeps media on a fixed playout clock while leaving OBS buffering enabled. "
-		"Recommended for live SRT sources that occasionally build up delay.");
+		"Recommended for live SRT sources that occasionally build up delay. "
+		"While enabled, the normal appsink sync and sink drop/block options are "
+		"managed by the steady clock. Leave Disable buffering in OBS unchecked.");
 	prop = obs_properties_add_int(props, "steady_clock_target_ms", "Steady clock target buffer (ms)", 50, 1000, 10);
 	obs_property_set_long_description(
 		prop,

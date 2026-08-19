@@ -22,10 +22,12 @@
 #define STEADY_MIN_BUFFER_MS 20
 #define STEADY_MAX_BUFFER_EXTRA_MS 200
 #define STEADY_BUFFER_CAP_MULTIPLIER 4
+#define STEADY_MAX_VIDEO_QUEUE 8
 #define STEADY_MAX_LAG_MS 1500
 #define STEADY_PTS_RESET_MS 2000
 #define STEADY_SILENCE_FADE_MS 5
 #define STEADY_VIDEO_INTERVAL_NS 16666667ULL
+#define STEADY_VIDEO_LATE_TOLERANCE_NS 100000000ULL
 
 typedef struct {
 	float *samples;
@@ -78,6 +80,9 @@ struct steady_clock {
 	uint64_t video_anchor_system_ns;
 	uint64_t video_anchor_pts_ns;
 	bool video_anchor_valid;
+	uint64_t playout_input_anchor_pts_ns;
+	bool playout_anchor_valid;
+	uint64_t next_video_ns;
 
 	float output_speed;
 	GstAudioResampler *resampler;
@@ -271,10 +276,21 @@ static float compute_speed_locked(steady_clock_t *clock, int fill_ms)
 static uint64_t video_due_ns_locked(steady_clock_t *clock,
 					uint64_t pts_ns)
 {
-	if (clock->latest_input_audio_end_ns != 0 &&
-	    clock->latest_output_audio_end_ns != 0)
-		return pts_ns + (clock->latest_output_audio_end_ns -
-				 clock->latest_input_audio_end_ns);
+	/* Keep the video mapping fixed for the duration of a playout epoch. The
+	 * old implementation recomputed this from the latest audio chunk for every
+	 * video frame. A small audio-rate correction could therefore move the video
+	 * deadline while the frame was queued, making frames appear late or causing
+	 * OBS to receive a burst of frames. */
+	if (clock->playout_anchor_valid) {
+		if (pts_ns >= clock->playout_input_anchor_pts_ns)
+			return clock->output_anchor_ns +
+				(pts_ns - clock->playout_input_anchor_pts_ns);
+
+		uint64_t delta = clock->playout_input_anchor_pts_ns - pts_ns;
+		return clock->output_anchor_ns > delta
+			? clock->output_anchor_ns - delta
+			: 0;
+	}
 
 	if (!clock->video_anchor_valid) {
 		clock->video_anchor_valid = true;
@@ -337,6 +353,15 @@ static void output_audio_locked(steady_clock_t *clock, uint64_t now_ns)
 		}
 	}
 
+	/* If a stall forced a new playout epoch, bind the first real audio sample
+	 * to the first output timestamp of that epoch. This also makes the mapping
+	 * robust if the source did not provide video before the first audio output.
+	 */
+	if (copied > 0 && !clock->playout_anchor_valid) {
+		clock->playout_input_anchor_pts_ns = input_pts_ns;
+		clock->playout_anchor_valid = true;
+	}
+
 	gpointer input_planes[1] = {clock->input_scratch};
 	gpointer output_planes[1] = {clock->output_scratch};
 	gst_audio_resampler_resample(clock->resampler, input_planes, input_frames,
@@ -395,6 +420,9 @@ static void output_audio_locked(steady_clock_t *clock, uint64_t now_ns)
 
 static void output_video_locked(steady_clock_t *clock, uint64_t now_ns)
 {
+	if (clock->next_video_ns > now_ns)
+		return;
+
 	while (!g_queue_is_empty(clock->video)) {
 		video_frame_t *frame = g_queue_peek_head(clock->video);
 		uint64_t due = video_due_ns_locked(clock, frame->pts_ns);
@@ -402,7 +430,7 @@ static void output_video_locked(steady_clock_t *clock, uint64_t now_ns)
 			break;
 
 		g_queue_pop_head(clock->video);
-		if (now_ns > due + STEADY_VIDEO_INTERVAL_NS * 2) {
+		if (now_ns > due + STEADY_VIDEO_LATE_TOLERANCE_NS) {
 			clock->stats.late_video_frames++;
 			free_video_frame(frame);
 			continue;
@@ -413,7 +441,15 @@ static void output_video_locked(steady_clock_t *clock, uint64_t now_ns)
 		g_mutex_unlock(&clock->mutex);
 		video_callback(opaque, sample, due);
 		g_mutex_lock(&clock->mutex);
+		uint64_t interval = frame->duration_ns;
+		if (interval == 0 || interval > 250000000ULL)
+			interval = STEADY_VIDEO_INTERVAL_NS;
+		clock->next_video_ns = due + interval;
 		free_video_frame(frame);
+		/* Never drain multiple video frames in one scheduler pass. If several
+		 * frames are already due, the next pass will either wait for the frame
+		 * interval or discard the stale head. */
+		break;
 	}
 }
 
@@ -435,7 +471,14 @@ static gpointer steady_clock_thread(gpointer user_data)
 			clock->primed = true;
 			clock->output_anchor_ns = now +
 				(uint64_t)STEADY_OUTPUT_LEAD_MS * 1000000ULL;
+			audio_chunk_t *first_audio = g_queue_peek_head(clock->audio);
+			if (first_audio) {
+				clock->playout_input_anchor_pts_ns = first_audio->pts_ns +
+					frames_to_ns(first_audio->offset, first_audio->sample_rate);
+				clock->playout_anchor_valid = true;
+			}
 			clock->next_audio_ns = clock->output_anchor_ns;
+			clock->next_video_ns = 0;
 			clock->output_samples = 0;
 			clock->output_speed = 1.0f;
 			clock->stats.primed = true;
@@ -445,7 +488,9 @@ static gpointer steady_clock_thread(gpointer user_data)
 		if (!g_queue_is_empty(clock->video)) {
 			video_frame_t *frame = g_queue_peek_head(clock->video);
 			uint64_t due = video_due_ns_locked(clock, frame->pts_ns);
-			if (due < next_wake)
+			if (clock->next_video_ns > now && clock->next_video_ns < next_wake)
+				next_wake = clock->next_video_ns;
+			else if (clock->next_video_ns <= now && due < next_wake)
 				next_wake = due;
 		}
 
@@ -560,6 +605,9 @@ void steady_clock_reset(steady_clock_t *clock)
 	clock->input_anchor_valid = false;
 	clock->stall_reanchored = false;
 	clock->video_anchor_valid = false;
+	clock->playout_anchor_valid = false;
+	clock->playout_input_anchor_pts_ns = 0;
+	clock->next_video_ns = 0;
 	clock->output_speed = 1.0f;
 	if (clock->last_output)
 		memset(clock->last_output, 0,
@@ -606,6 +654,8 @@ bool steady_clock_push_audio(steady_clock_t *clock, const float *samples,
 		reset_resampler_locked(clock);
 		clock->primed = false;
 		clock->video_anchor_valid = false;
+		clock->playout_anchor_valid = false;
+		clock->next_video_ns = 0;
 		clock->input_anchor_valid = false;
 	}
 	if (!clock->input_anchor_valid) {
@@ -647,6 +697,10 @@ bool steady_clock_push_video(steady_clock_t *clock, GstSample *sample,
 	frame->duration_ns = duration_ns;
 	g_mutex_lock(&clock->mutex);
 	g_queue_push_tail(clock->video, frame);
+	while (g_queue_get_length(clock->video) > STEADY_MAX_VIDEO_QUEUE) {
+		clock->stats.late_video_frames++;
+		free_video_frame(g_queue_pop_head(clock->video));
+	}
 	g_cond_signal(&clock->cond);
 	g_mutex_unlock(&clock->mutex);
 	return true;
