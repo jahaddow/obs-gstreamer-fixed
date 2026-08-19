@@ -18,12 +18,23 @@
 # along with obs-gstreamer. If not, see <http://www.gnu.org/licenses/>.
 #
 
-project('obs', 'c')
+test_deps = [
+  dependency('glib-2.0'),
+  dependency('gstreamer-1.0'),
+  dependency('gstreamer-audio-1.0'),
+]
 
-executable('obs',
-    'main.c',
-    dependencies : [
-        dependency('libobs'),
-        dependency('wayland-client'),
-    ],
+m_dep = meson.get_compiler('c').find_library('m', required : false)
+if m_dep.found()
+  test_deps += m_dep
+endif
+
+steady_clock_test = executable('steady-clock-test',
+  'steady-clock-test.c',
+  '../steady-clock.c',
+  dependencies : test_deps,
+)
+
+test('steady-clock', steady_clock_test,
+  timeout : 10,
 )

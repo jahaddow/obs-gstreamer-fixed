@@ -35,9 +35,46 @@ if host_machine.system() == 'darwin'
   name_suffix = 'so'
 endif
 
+gst_deps = [
+  dependency('gstreamer-1.0', version : '>=1.16.0'),
+  dependency('gstreamer-video-1.0'),
+  dependency('gstreamer-audio-1.0'),
+  dependency('gstreamer-app-1.0'),
+  dependency('gstreamer-net-1.0'),
+]
+
+link_deps = [obs_dep] + gst_deps
+extra_link_args = []
+
+math_dep = meson.get_compiler('c').find_library('m', required : false)
+if math_dep.found()
+  link_deps += math_dep
+endif
+
+if host_machine.system() == 'windows'
+  gst_compile_deps = []
+  foreach dep : gst_deps
+    gst_compile_deps += dep.partial_dependency(compile_args : true, includes : true)
+  endforeach
+  link_deps = [obs_dep] + gst_compile_deps
+
+  delayimp_dir = get_option('gst_delayimp_dir')
+  if delayimp_dir == ''
+    error('gst_delayimp_dir must be set when building for Windows')
+  endif
+
+  foreach name : ['libgstreamer-1.0-0', 'libgobject-2.0-0', 'libglib-2.0-0', 'libintl-8',
+                  'libgstvideo-1.0-0', 'libgstbase-1.0-0', 'libgstaudio-1.0-0', 'libgsttag-1.0-0',
+                  'libgstapp-1.0-0', 'libgstnet-1.0-0', 'libgio-2.0-0']
+    extra_link_args += [delayimp_dir / 'lib' + name + '_delay.a']
+  endforeach
+  extra_link_args += ['-ldelayimp']
+endif
+
 shared_library('obs-gstreamer',
   'gstreamer.c',
   'gstreamer-source.c',
+  'steady-clock.c',
   'gstreamer-encoder.c',
   'gstreamer-filter.c',
   'gstreamer-output.c',
@@ -48,13 +85,11 @@ shared_library('obs-gstreamer',
   ),
   name_prefix : '',
   name_suffix : name_suffix,
-  dependencies : [
-    obs_dep,
-    dependency('gstreamer-1.0', version : '>=1.16.0'),
-    dependency('gstreamer-video-1.0'),
-    dependency('gstreamer-audio-1.0'),
-    dependency('gstreamer-app-1.0'),
-    dependency('gstreamer-net-1.0'),
-  ],
+  dependencies : link_deps,
+  link_args : extra_link_args,
   install : true,
 )
+
+if get_option('build_tests')
+  subdir('test')
+endif
