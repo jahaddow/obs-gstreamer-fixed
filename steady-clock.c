@@ -25,7 +25,7 @@
 #define STEADY_MAX_VIDEO_QUEUE 8
 #define STEADY_MAX_LAG_MS 1500
 #define STEADY_PTS_RESET_MS 2000
-#define STEADY_PTS_BACKWARD_TOLERANCE_MS 100
+#define STEADY_PTS_BACKWARD_TOLERANCE_MS 500
 #define STEADY_SILENCE_FADE_MS 5
 #define STEADY_VIDEO_INTERVAL_NS 16666667ULL
 #define STEADY_VIDEO_LATE_TOLERANCE_NS 100000000ULL
@@ -143,6 +143,13 @@ static void clear_queues_locked(steady_clock_t *clock)
 		free_audio_chunk(g_queue_pop_head(clock->audio));
 	while (!g_queue_is_empty(clock->video))
 		free_video_frame(g_queue_pop_head(clock->video));
+	clock->audio_frames = 0;
+}
+
+static void clear_audio_queue_locked(steady_clock_t *clock)
+{
+	while (!g_queue_is_empty(clock->audio))
+		free_audio_chunk(g_queue_pop_head(clock->audio));
 	clock->audio_frames = 0;
 }
 
@@ -678,7 +685,10 @@ bool steady_clock_push_audio(steady_clock_t *clock, const float *samples,
 	if (clock->last_input_pts_ns != 0 && (input_rewind || input_gap)) {
 		input_discontinuity = true;
 		previous_pts_ns = clock->last_input_pts_ns;
-		clear_queues_locked(clock);
+		/* The audio timeline can reset independently of the decoded video
+		 * queue. Keep a small amount of video available; output_video_locked()
+		 * will discard frames that are stale against the new media anchor. */
+		clear_audio_queue_locked(clock);
 		reset_resampler_locked(clock);
 		/* This is an input timeline reset, not an OBS output reset. Keep
 		 * next_audio_ns advancing continuously so OBS never sees a forward

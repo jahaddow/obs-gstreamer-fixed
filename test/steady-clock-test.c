@@ -276,6 +276,43 @@ static void test_small_audio_overlap_does_not_reset_output(void)
 	g_mutex_clear(&capture.mutex);
 }
 
+static void test_audio_reset_keeps_resumed_video(void)
+{
+	struct capture capture = {0};
+	g_mutex_init(&capture.mutex);
+	capture.timestamps = g_array_new(FALSE, FALSE, sizeof(uint64_t));
+	capture.video_timestamps = g_array_new(FALSE, FALSE, sizeof(uint64_t));
+	struct steady_clock_callbacks callbacks = {
+		.audio = capture_audio,
+		.video = capture_video,
+	};
+	steady_clock_t *clock = steady_clock_create(&capture, &callbacks, 48000,
+							50, true);
+	g_assert_nonnull(clock);
+	steady_clock_start(clock);
+	for (unsigned i = 0; i < 8; i++)
+		push_audio(clock, 0.25f, (uint64_t)i * 20000000ULL);
+	g_usleep(250000);
+
+	GstSample *sample = make_test_video_sample();
+	/* This frame belongs to the media epoch that follows the PTS gap. */
+	g_assert_true(steady_clock_push_video(clock, sample, 10000000000ULL,
+							33333333ULL));
+	gst_sample_unref(sample);
+	push_audio(clock, 0.5f, 10000000000ULL);
+	g_usleep(300000);
+
+	g_assert_cmpuint(capture.video_timestamps->len, >, 0);
+	struct steady_clock_stats stats = {0};
+	steady_clock_get_stats(clock, &stats);
+	g_assert_true(stats.primed);
+
+	steady_clock_destroy(clock);
+	g_array_free(capture.timestamps, TRUE);
+	g_array_free(capture.video_timestamps, TRUE);
+	g_mutex_clear(&capture.mutex);
+}
+
 int main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -286,5 +323,7 @@ int main(int argc, char **argv)
 	g_test_add_func("/steady-clock/underrun-reanchors-once", test_underrun_reanchors_once);
 	g_test_add_func("/steady-clock/discontinuous-audio-reprime", test_discontinuous_audio_reprime);
 	g_test_add_func("/steady-clock/small-audio-overlap", test_small_audio_overlap_does_not_reset_output);
+	g_test_add_func("/steady-clock/audio-reset-keeps-resumed-video",
+			 test_audio_reset_keeps_resumed_video);
 	return g_test_run();
 }
