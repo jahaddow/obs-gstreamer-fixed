@@ -41,6 +41,8 @@ typedef struct {
 	GThread *thread;
 	GMainLoop *loop;
 	steady_clock_t *steady;
+	uint64_t last_steady_audio_timestamp;
+	bool have_last_steady_audio_timestamp;
 	GMutex mutex;
 	GCond cond;
 } data_t;
@@ -302,10 +304,25 @@ static void output_video_sample(data_t *data, GstSample *sample,
 }
 
 static void steady_audio_output(void *opaque, const float *samples, size_t frames,
-					unsigned channels, unsigned sample_rate,
-					uint64_t timestamp_ns)
+				 unsigned channels, unsigned sample_rate,
+				 uint64_t timestamp_ns)
 {
 	data_t *data = opaque;
+	if (data->have_last_steady_audio_timestamp) {
+		uint64_t previous = data->last_steady_audio_timestamp;
+		uint64_t delta = timestamp_ns >= previous ? timestamp_ns - previous : 0;
+		if (timestamp_ns < previous || delta > 30000000ULL) {
+			blog(LOG_WARNING,
+			     "[obs-gstreamer] %s: generated steady audio timestamp discontinuity "
+			     "previous=%llu current=%llu delta=%llu ns",
+			     obs_source_get_name(data->source),
+			     (unsigned long long)previous,
+			     (unsigned long long)timestamp_ns,
+			     (unsigned long long)delta);
+		}
+	}
+	data->last_steady_audio_timestamp = timestamp_ns;
+	data->have_last_steady_audio_timestamp = true;
 	struct obs_source_audio audio = {0};
 
 	audio.data[0] = (uint8_t *)samples;
@@ -365,6 +382,8 @@ static void configure_steady_clock(data_t *data)
 	if (data->steady)
 		steady_clock_destroy(data->steady);
 	data->steady = NULL;
+	data->have_last_steady_audio_timestamp = false;
+	data->last_steady_audio_timestamp = 0;
 
 	if (!obs_data_get_bool(data->settings, "steady_clock"))
 		return;
