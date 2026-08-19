@@ -307,6 +307,7 @@ static void output_audio_locked(steady_clock_t *clock, uint64_t now_ns)
 {
 	if (clock->audio_rate == 0 || clock->audio_channels == 0)
 		return;
+	bool reanchored = false;
 
 	const size_t output_frames = MAX(1, (size_t)((long double)clock->output_rate *
 						STEADY_AUDIO_CHUNK_MS / 1000.0L));
@@ -354,6 +355,7 @@ static void output_audio_locked(steady_clock_t *clock, uint64_t now_ns)
 			clock->playout_anchor_valid = false;
 			clock->playout_input_anchor_pts_ns = 0;
 			clock->stall_reanchored = true;
+			reanchored = true;
 		}
 	}
 
@@ -413,11 +415,14 @@ static void output_audio_locked(steady_clock_t *clock, uint64_t now_ns)
 	 * owned by the clock until the synchronous callback returns. */
 	void (*audio_callback)(void *, const float *, size_t, unsigned, unsigned,
 				      uint64_t) = clock->callbacks.audio;
+	void (*reanchor_callback)(void *) = clock->callbacks.reanchored;
 	void *opaque = clock->opaque;
 	unsigned channels = clock->audio_channels;
 	unsigned output_rate = clock->output_rate;
 	float *samples = clock->output_scratch;
 	g_mutex_unlock(&clock->mutex);
+	if (reanchored && reanchor_callback)
+		reanchor_callback(opaque);
 	audio_callback(opaque, samples, output_frames, channels, output_rate, output_ts);
 	g_mutex_lock(&clock->mutex);
 }

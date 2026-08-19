@@ -29,6 +29,7 @@ struct steady_clock_callbacks {
 	void (*audio)(void *opaque, const float *samples, size_t frames,
 		      unsigned channels, unsigned sample_rate, uint64_t timestamp_ns);
 	void (*video)(void *opaque, GstSample *sample, uint64_t timestamp_ns);
+	void (*reanchored)(void *opaque);
 };
 
 steady_clock_t *steady_clock_create(void *opaque,

@@ -47,6 +47,15 @@ typedef struct {
 
 static void create_pipeline(data_t *data);
 
+static void reset_steady_clock(data_t *data, const char *reason)
+{
+	if (!data->steady)
+		return;
+	blog(LOG_INFO, "[obs-gstreamer] %s: steady clock reset (%s)",
+		obs_source_get_name(data->source), reason);
+	steady_clock_reset(data->steady);
+}
+
 static void timeout_destroy(gpointer user_data)
 {
 	data_t *data = user_data;
@@ -62,7 +71,7 @@ static gboolean pipeline_destroy(gpointer user_data)
 
 	if (data->steady) {
 		steady_clock_stop(data->steady);
-		steady_clock_reset(data->steady);
+		reset_steady_clock(data, "pipeline destroy");
 	}
 
 	if (!data->pipe)
@@ -161,8 +170,9 @@ static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer user_dat
 		g_error_free(err);
 	} // fallthrough
 	case GST_MESSAGE_EOS:
-		if (data->steady)
-			steady_clock_reset(data->steady);
+		reset_steady_clock(data, GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR
+					 ? "pipeline error"
+					 : "end of stream");
 		if (obs_data_get_bool(data->settings, "clear_on_end"))
 			obs_source_output_video(data->source, NULL);
 		if (obs_data_get_bool(data->settings, GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR
@@ -333,9 +343,16 @@ static void steady_audio_output(void *opaque, const float *samples, size_t frame
 }
 
 static void steady_video_output(void *opaque, GstSample *sample,
-					uint64_t timestamp_ns)
+				 uint64_t timestamp_ns)
 {
 	output_video_sample(opaque, sample, timestamp_ns);
+}
+
+static void steady_clock_reanchored(void *opaque)
+{
+	data_t *data = opaque;
+	blog(LOG_WARNING, "[obs-gstreamer] %s: steady clock re-anchored after audio input stall",
+		obs_source_get_name(data->source));
 }
 
 static bool steady_clock_enabled(const data_t *data)
@@ -360,6 +377,7 @@ static void configure_steady_clock(data_t *data)
 	struct steady_clock_callbacks callbacks = {
 		.audio = steady_audio_output,
 		.video = steady_video_output,
+		.reanchored = steady_clock_reanchored,
 	};
 	data->steady = steady_clock_create(
 		data, &callbacks, output_rate,
@@ -367,6 +385,11 @@ static void configure_steady_clock(data_t *data)
 		obs_data_get_bool(data->settings, "steady_clock_adaptive_speed"));
 	if (!data->steady)
 		blog(LOG_ERROR, "[obs-gstreamer] Could not create steady playout clock");
+	else
+		blog(LOG_INFO, "[obs-gstreamer] %s: steady clock enabled target=%dms adaptive=%s",
+			obs_source_get_name(data->source),
+			(int)obs_data_get_int(data->settings, "steady_clock_target_ms"),
+			obs_data_get_bool(data->settings, "steady_clock_adaptive_speed") ? "true" : "false");
 }
 
 static void gstreamer_source_get_stats(void *user_data, calldata_t *cd)

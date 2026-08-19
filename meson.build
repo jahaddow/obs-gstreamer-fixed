@@ -80,6 +80,7 @@ shared_library('obs-gstreamer',
   'gstreamer-output.c',
   vcs_tag(
     command : ['git', 'rev-parse', '--short', 'HEAD'],
+    fallback : 'unknown',
     input : 'version.c.in',
     output : 'version.c',
   ),

@@ -4,6 +4,11 @@ set -euo pipefail
 export PKG_CONFIG_PATH=/c/gstreamer/1.0/mingw_x86_64/lib/pkgconfig/
 export C_INCLUDE_PATH=/
 
+# The source tree is mounted from the GitHub runner and is owned by the
+# runner user. Allow the container's build user to query the VCS tag used in
+# the plugin diagnostic log.
+git config --global --add safe.directory /src
+
 rm -f cross.txt
 {
 	echo '[binaries]'
