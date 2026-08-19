@@ -228,6 +228,12 @@ static void test_discontinuous_audio_reprime(void)
 	steady_clock_get_stats(clock, &stats);
 	g_assert_true(stats.primed);
 	g_assert_cmpuint(capture.nonzero_callbacks, >, 2);
+	for (guint i = 1; i < capture.timestamps->len; i++) {
+		uint64_t previous = g_array_index(capture.timestamps, uint64_t, i - 1);
+		uint64_t current = g_array_index(capture.timestamps, uint64_t, i);
+		g_assert_cmpuint(current - previous, >=, 19000000ULL);
+		g_assert_cmpuint(current - previous, <=, 21000000ULL);
+	}
 
 	steady_clock_destroy(clock);
 	g_array_free(capture.timestamps, TRUE);

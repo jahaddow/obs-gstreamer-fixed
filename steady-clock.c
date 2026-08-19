@@ -646,10 +646,16 @@ bool steady_clock_push_audio(steady_clock_t *clock, const float *samples,
 	memcpy(chunk->samples, samples, frames * channels * sizeof(float));
 
 	g_mutex_lock(&clock->mutex);
+	bool input_discontinuity = false;
+	uint64_t previous_pts_ns = 0;
 	if (clock->audio_rate != 0 && clock->audio_rate != sample_rate) {
 		clear_queues_locked(clock);
 		reset_resampler_locked(clock);
-		clock->primed = false;
+		if (clock->primed)
+			clock->output_anchor_ns = clock->next_audio_ns;
+		else
+			clock->primed = false;
+		clock->playout_anchor_valid = false;
 		clock->input_anchor_valid = false;
 	}
 	clock->audio_rate = sample_rate;
@@ -659,9 +665,17 @@ bool steady_clock_push_audio(steady_clock_t *clock, const float *samples,
 	if (clock->last_input_pts_ns != 0 &&
 	    (pts_ns < clock->last_input_pts_ns ||
 	     pts_ns - clock->last_input_pts_ns > STEADY_PTS_RESET_MS * 1000000ULL)) {
+		input_discontinuity = true;
+		previous_pts_ns = clock->last_input_pts_ns;
 		clear_queues_locked(clock);
 		reset_resampler_locked(clock);
-		clock->primed = false;
+		/* This is an input timeline reset, not an OBS output reset. Keep
+		 * next_audio_ns advancing continuously so OBS never sees a forward
+		 * timestamp jump while the new media epoch is buffered. */
+		if (clock->primed)
+			clock->output_anchor_ns = clock->next_audio_ns;
+		else
+			clock->primed = false;
 		clock->video_anchor_valid = false;
 		clock->playout_anchor_valid = false;
 		clock->next_video_ns = 0;
@@ -691,7 +705,12 @@ bool steady_clock_push_audio(steady_clock_t *clock, const float *samples,
 				((audio_chunk_t *)item->data)->offset;
 	}
 	g_cond_signal(&clock->cond);
+	void (*discontinuity_callback)(void *, uint64_t, uint64_t) =
+		clock->callbacks.input_discontinuity;
+	void *opaque = clock->opaque;
 	g_mutex_unlock(&clock->mutex);
+	if (input_discontinuity && discontinuity_callback)
+		discontinuity_callback(opaque, previous_pts_ns, pts_ns);
 	return true;
 }
 

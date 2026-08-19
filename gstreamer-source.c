@@ -372,6 +372,19 @@ static void steady_clock_reanchored(void *opaque)
 		obs_source_get_name(data->source));
 }
 
+static void steady_clock_input_discontinuity(void *opaque,
+						uint64_t previous_pts_ns,
+						uint64_t current_pts_ns)
+{
+	data_t *data = opaque;
+	blog(LOG_WARNING,
+	     "[obs-gstreamer] %s: input audio timestamp discontinuity "
+	     "previous=%llu current=%llu",
+	     obs_source_get_name(data->source),
+	     (unsigned long long)previous_pts_ns,
+	     (unsigned long long)current_pts_ns);
+}
+
 static bool steady_clock_enabled(const data_t *data)
 {
 	return data->steady != NULL;
@@ -397,6 +410,7 @@ static void configure_steady_clock(data_t *data)
 		.audio = steady_audio_output,
 		.video = steady_video_output,
 		.reanchored = steady_clock_reanchored,
+		.input_discontinuity = steady_clock_input_discontinuity,
 	};
 	data->steady = steady_clock_create(
 		data, &callbacks, output_rate,

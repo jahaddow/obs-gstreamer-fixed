@@ -30,6 +30,8 @@ struct steady_clock_callbacks {
 		      unsigned channels, unsigned sample_rate, uint64_t timestamp_ns);
 	void (*video)(void *opaque, GstSample *sample, uint64_t timestamp_ns);
 	void (*reanchored)(void *opaque);
+	void (*input_discontinuity)(void *opaque, uint64_t previous_pts_ns,
+				    uint64_t current_pts_ns);
 };
 
 steady_clock_t *steady_clock_create(void *opaque,
