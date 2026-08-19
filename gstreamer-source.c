@@ -373,7 +373,9 @@ static void gstreamer_source_get_stats(void *user_data, calldata_t *cd)
 {
 	data_t *data = user_data;
 	struct steady_clock_stats stats = {0};
+	g_mutex_lock(&data->mutex);
 	steady_clock_get_stats(data->steady, &stats);
+	g_mutex_unlock(&data->mutex);
 	calldata_set_int(cd, "buffer_fill_ms", stats.buffer_fill_ms);
 	calldata_set_float(cd, "output_speed", stats.output_speed);
 	calldata_set_int(cd, "stream_delay_ms", stats.stream_delay_ms);
@@ -853,6 +855,9 @@ void *gstreamer_source_create(obs_data_t *settings, obs_source_t *source)
 
 	data->source = source;
 	data->settings = settings;
+	g_mutex_init(&data->mutex);
+	g_cond_init(&data->cond);
+
 	configure_steady_clock(data);
 	obs_source_set_async_unbuffered(source,
 		data->steady ? false : obs_data_get_bool(settings, "no_buffer"));
@@ -865,9 +870,6 @@ void *gstreamer_source_create(obs_data_t *settings, obs_source_t *source)
 			"out int audio_underruns, out int clock_reanchors, "
 			"out int late_video_frames, out bool primed)",
 			gstreamer_source_get_stats, data);
-
-	g_mutex_init(&data->mutex);
-	g_cond_init(&data->cond);
 
 	if (obs_data_get_bool(settings, "stop_on_hide") == false)
 		start(data);
@@ -1000,6 +1002,7 @@ void gstreamer_source_update(void *data, obs_data_t *settings)
 {
 	data_t *source_data = data;
 	stop(source_data);
+	g_mutex_lock(&source_data->mutex);
 	source_data->settings = settings;
 	configure_steady_clock(source_data);
 
@@ -1008,6 +1011,7 @@ void gstreamer_source_update(void *data, obs_data_t *settings)
 		source_data->steady ? false : obs_data_get_bool(settings, "no_buffer"));
 	if (source_data->steady)
 		obs_source_set_async_decoupled(source_data->source, false);
+	g_mutex_unlock(&source_data->mutex);
 
 	// Don't start the pipeline if source is hidden and 'stop_on_hide' is set.
 	// From GUI this is probably irrelevant but works around some quirks when
