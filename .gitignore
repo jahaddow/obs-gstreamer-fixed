@@ -1,0 +1,12 @@
+/linux/
+/macos/
+/macos-aarch64/
+/windows/
+/gst-delayimp/
+/cross.txt
+/test-build*/
+/build-local/
+/package/
+/.ci-cache/
+/obs-gstreamer-windows-x64.*
+/windows-imports.txt

@@ -21,7 +21,56 @@
 #include <obs/obs-module.h>
 #include <gst/gst.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <wchar.h>
+#endif
+
 extern const char *obs_gstreamer_version;
+
+#ifdef _WIN32
+static DLL_DIRECTORY_COOKIE gstreamer_dll_directory_cookie;
+
+static bool configure_gstreamer_windows_paths(void)
+{
+	static const wchar_t *const roots[] = {
+		L"GSTREAMER_1_0_ROOT_MINGW_X86_64",
+		L"GSTREAMER_1_0_ROOT_MSVC_X86_64",
+	};
+
+	for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+		wchar_t root[MAX_PATH] = {0};
+		DWORD root_len = GetEnvironmentVariableW(roots[i], root, MAX_PATH);
+		if (root_len == 0 || root_len >= MAX_PATH - 64)
+			continue;
+
+		if (root[root_len - 1] == L'\\')
+			root[root_len - 1] = L'\0';
+
+		wchar_t bin_path[MAX_PATH];
+		wchar_t plugin_path[MAX_PATH];
+		wchar_t core_dll[MAX_PATH];
+		if (swprintf(bin_path, MAX_PATH, L"%ls\\bin", root) < 0 ||
+		    swprintf(plugin_path, MAX_PATH, L"%ls\\lib\\gstreamer-1.0", root) < 0 ||
+		    swprintf(core_dll, MAX_PATH, L"%ls\\libgstreamer-1.0-0.dll", bin_path) < 0)
+			continue;
+
+		if (GetFileAttributesW(core_dll) == INVALID_FILE_ATTRIBUTES)
+			continue;
+
+		gstreamer_dll_directory_cookie = AddDllDirectory(bin_path);
+		if (!gstreamer_dll_directory_cookie)
+			continue;
+
+		DWORD existing_len = GetEnvironmentVariableW(L"GST_PLUGIN_PATH", NULL, 0);
+		if (existing_len == 0)
+			SetEnvironmentVariableW(L"GST_PLUGIN_PATH", plugin_path);
+		return true;
+	}
+
+	return false;
+}
+#endif
 
 OBS_DECLARE_MODULE()
 
@@ -81,6 +130,15 @@ extern obs_properties_t *gstreamer_output_get_properties(void *data);
 bool obs_module_load(void)
 {
 	guint major, minor, micro, nano;
+
+#ifdef _WIN32
+	if (!configure_gstreamer_windows_paths()) {
+		blog(LOG_ERROR,
+		     "[obs-gstreamer] Could not locate a GStreamer runtime. Checked "
+		     "GSTREAMER_1_0_ROOT_MINGW_X86_64 and GSTREAMER_1_0_ROOT_MSVC_X86_64.");
+		return false;
+	}
+#endif
 
 	gst_version(&major, &minor, &micro, &nano);
 
@@ -214,3 +272,13 @@ bool obs_module_load(void)
 
 	return true;
 }
+
+#ifdef _WIN32
+void obs_module_unload(void)
+{
+	if (gstreamer_dll_directory_cookie) {
+		RemoveDllDirectory(gstreamer_dll_directory_cookie);
+		gstreamer_dll_directory_cookie = NULL;
+	}
+}
+#endif

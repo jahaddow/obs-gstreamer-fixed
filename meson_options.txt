@@ -1,0 +1,4 @@
+option('gst_delayimp_dir', type : 'string', value : '',
+  description : 'Directory containing Windows GStreamer delay-import archives')
+option('build_tests', type : 'boolean', value : false,
+  description : 'Build the standalone timing tests')

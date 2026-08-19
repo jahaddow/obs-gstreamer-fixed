@@ -25,6 +25,8 @@
 #include <gst/app/app.h>
 #include <gst/net/gstnet.h>
 
+#include "steady-clock.h"
+
 typedef struct {
 	GstElement *pipe;
 	GstClock *clock;
@@ -38,11 +40,23 @@ typedef struct {
 	GSource *timeout;
 	GThread *thread;
 	GMainLoop *loop;
+	steady_clock_t *steady;
+	uint64_t last_steady_audio_timestamp;
+	bool have_last_steady_audio_timestamp;
 	GMutex mutex;
 	GCond cond;
 } data_t;
 
 static void create_pipeline(data_t *data);
+
+static void reset_steady_clock(data_t *data, const char *reason)
+{
+	if (!data->steady)
+		return;
+	blog(LOG_INFO, "[obs-gstreamer] %s: steady clock reset (%s)",
+		obs_source_get_name(data->source), reason);
+	steady_clock_reset(data->steady);
+}
 
 static void timeout_destroy(gpointer user_data)
 {
@@ -56,6 +70,11 @@ static void timeout_destroy(gpointer user_data)
 static gboolean pipeline_destroy(gpointer user_data)
 {
 	data_t *data = user_data;
+
+	if (data->steady) {
+		steady_clock_stop(data->steady);
+		reset_steady_clock(data, "pipeline destroy");
+	}
 
 	if (!data->pipe)
 		return G_SOURCE_REMOVE;
@@ -139,6 +158,7 @@ static void update_obs_media_state(GstMessage *message, data_t *data)
 
 static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer user_data)
 {
+	(void)bus;
 	data_t *data = user_data;
 
 	update_obs_media_state(message, data);
@@ -152,6 +172,9 @@ static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer user_dat
 		g_error_free(err);
 	} // fallthrough
 	case GST_MESSAGE_EOS:
+		reset_steady_clock(data, GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR
+					 ? "pipeline error"
+					 : "end of stream");
 		if (obs_data_get_bool(data->settings, "clear_on_end"))
 			obs_source_output_video(data->source, NULL);
 		if (obs_data_get_bool(data->settings, GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR
@@ -177,10 +200,9 @@ static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer user_dat
 	return TRUE;
 }
 
-static GstFlowReturn video_new_sample(GstAppSink *appsink, gpointer user_data)
+static void output_video_sample(data_t *data, GstSample *sample,
+				uint64_t timestamp_ns)
 {
-	data_t *data = user_data;
-	GstSample *sample = gst_app_sink_pull_sample(appsink);
 	GstBuffer *buffer = gst_sample_get_buffer(sample);
 	GstCaps *caps = gst_sample_get_caps(sample);
 	GstMapInfo info;
@@ -191,8 +213,7 @@ static GstFlowReturn video_new_sample(GstAppSink *appsink, gpointer user_data)
 
 	struct obs_source_frame frame = {};
 
-	frame.timestamp = obs_data_get_bool(data->settings, "use_timestamps_video") ? GST_BUFFER_PTS(buffer)
-										    : data->frame_count++;
+	frame.timestamp = timestamp_ns;
 
 	frame.width = video_info.width;
 	frame.height = video_info.height;
@@ -280,6 +301,169 @@ static GstFlowReturn video_new_sample(GstAppSink *appsink, gpointer user_data)
 	obs_source_output_video(data->source, &frame);
 
 	gst_buffer_unmap(buffer, &info);
+}
+
+static void steady_audio_output(void *opaque, const float *samples, size_t frames,
+				 unsigned channels, unsigned sample_rate,
+				 uint64_t timestamp_ns)
+{
+	data_t *data = opaque;
+	if (data->have_last_steady_audio_timestamp) {
+		uint64_t previous = data->last_steady_audio_timestamp;
+		uint64_t delta = timestamp_ns >= previous ? timestamp_ns - previous : 0;
+		if (timestamp_ns < previous || delta > 30000000ULL) {
+			blog(LOG_WARNING,
+			     "[obs-gstreamer] %s: generated steady audio timestamp discontinuity "
+			     "previous=%llu current=%llu delta=%llu ns",
+			     obs_source_get_name(data->source),
+			     (unsigned long long)previous,
+			     (unsigned long long)timestamp_ns,
+			     (unsigned long long)delta);
+		}
+	}
+	data->last_steady_audio_timestamp = timestamp_ns;
+	data->have_last_steady_audio_timestamp = true;
+	struct obs_source_audio audio = {0};
+
+	audio.data[0] = (uint8_t *)samples;
+	audio.frames = (uint32_t)MIN(frames, UINT32_MAX);
+	audio.samples_per_sec = sample_rate;
+	audio.format = AUDIO_FORMAT_FLOAT;
+	switch (channels) {
+	case 1:
+		audio.speakers = SPEAKERS_MONO;
+		break;
+	case 2:
+		audio.speakers = SPEAKERS_STEREO;
+		break;
+	case 3:
+		audio.speakers = SPEAKERS_2POINT1;
+		break;
+	case 4:
+		audio.speakers = SPEAKERS_4POINT0;
+		break;
+	case 5:
+		audio.speakers = SPEAKERS_4POINT1;
+		break;
+	case 6:
+		audio.speakers = SPEAKERS_5POINT1;
+		break;
+	case 8:
+		audio.speakers = SPEAKERS_7POINT1;
+		break;
+	default:
+		audio.speakers = SPEAKERS_UNKNOWN;
+		return;
+	}
+	audio.timestamp = timestamp_ns;
+	obs_source_output_audio(data->source, &audio);
+}
+
+static void steady_video_output(void *opaque, GstSample *sample,
+				 uint64_t timestamp_ns)
+{
+	output_video_sample(opaque, sample, timestamp_ns);
+}
+
+static void steady_clock_reanchored(void *opaque)
+{
+	data_t *data = opaque;
+	blog(LOG_WARNING, "[obs-gstreamer] %s: steady clock re-anchored after audio input stall",
+		obs_source_get_name(data->source));
+}
+
+static void steady_clock_input_discontinuity(void *opaque,
+						uint64_t previous_pts_ns,
+						uint64_t current_pts_ns)
+{
+	data_t *data = opaque;
+	blog(LOG_WARNING,
+	     "[obs-gstreamer] %s: input audio timestamp discontinuity "
+	     "previous=%llu current=%llu",
+	     obs_source_get_name(data->source),
+	     (unsigned long long)previous_pts_ns,
+	     (unsigned long long)current_pts_ns);
+}
+
+static bool steady_clock_enabled(const data_t *data)
+{
+	return data->steady != NULL;
+}
+
+static void configure_steady_clock(data_t *data)
+{
+	if (data->steady)
+		steady_clock_destroy(data->steady);
+	data->steady = NULL;
+	data->have_last_steady_audio_timestamp = false;
+	data->last_steady_audio_timestamp = 0;
+
+	if (!obs_data_get_bool(data->settings, "steady_clock"))
+		return;
+
+	struct obs_audio_info audio_info = {0};
+	unsigned output_rate = 48000;
+	if (obs_get_audio_info(&audio_info) && audio_info.samples_per_sec > 0)
+		output_rate = audio_info.samples_per_sec;
+
+	struct steady_clock_callbacks callbacks = {
+		.audio = steady_audio_output,
+		.video = steady_video_output,
+		.reanchored = steady_clock_reanchored,
+		.input_discontinuity = steady_clock_input_discontinuity,
+	};
+	data->steady = steady_clock_create(
+		data, &callbacks, output_rate,
+		(int)obs_data_get_int(data->settings, "steady_clock_target_ms"),
+		obs_data_get_bool(data->settings, "steady_clock_adaptive_speed"));
+	if (!data->steady)
+		blog(LOG_ERROR, "[obs-gstreamer] Could not create steady playout clock");
+	else
+		blog(LOG_INFO, "[obs-gstreamer] %s: steady clock enabled target=%dms adaptive=%s",
+			obs_source_get_name(data->source),
+			(int)obs_data_get_int(data->settings, "steady_clock_target_ms"),
+			obs_data_get_bool(data->settings, "steady_clock_adaptive_speed") ? "true" : "false");
+}
+
+static void gstreamer_source_get_stats(void *user_data, calldata_t *cd)
+{
+	data_t *data = user_data;
+	struct steady_clock_stats stats = {0};
+	g_mutex_lock(&data->mutex);
+	steady_clock_get_stats(data->steady, &stats);
+	g_mutex_unlock(&data->mutex);
+	calldata_set_int(cd, "buffer_fill_ms", stats.buffer_fill_ms);
+	calldata_set_float(cd, "output_speed", stats.output_speed);
+	calldata_set_int(cd, "stream_delay_ms", stats.stream_delay_ms);
+	calldata_set_int(cd, "audio_underruns", stats.audio_underruns);
+	calldata_set_int(cd, "clock_reanchors", stats.clock_reanchors);
+	calldata_set_int(cd, "late_video_frames", stats.late_video_frames);
+	calldata_set_bool(cd, "primed", stats.primed);
+}
+
+static GstFlowReturn video_new_sample(GstAppSink *appsink, gpointer user_data)
+{
+	data_t *data = user_data;
+	GstSample *sample = gst_app_sink_pull_sample(appsink);
+	if (!sample)
+		return GST_FLOW_OK;
+
+	GstBuffer *buffer = gst_sample_get_buffer(sample);
+	GstClockTime pts = GST_BUFFER_PTS(buffer);
+	if (data->steady) {
+		if (pts == GST_CLOCK_TIME_NONE)
+			pts = GST_BUFFER_DTS(buffer);
+		if (pts == GST_CLOCK_TIME_NONE)
+			pts = (GstClockTime)g_get_monotonic_time() * 1000ULL;
+		steady_clock_push_video(data->steady, sample, pts,
+					GST_BUFFER_DURATION(buffer));
+	} else {
+		output_video_sample(data, sample,
+					obs_data_get_bool(data->settings, "use_timestamps_video")
+						? pts
+						: data->frame_count++);
+	}
+
 	gst_sample_unref(sample);
 
 	return GST_FLOW_OK;
@@ -289,6 +473,8 @@ static GstFlowReturn audio_new_sample(GstAppSink *appsink, gpointer user_data)
 {
 	data_t *data = user_data;
 	GstSample *sample = gst_app_sink_pull_sample(appsink);
+	if (!sample)
+		return GST_FLOW_OK;
 	GstBuffer *buffer = gst_sample_get_buffer(sample);
 	GstCaps *caps = gst_sample_get_caps(sample);
 	GstMapInfo info;
@@ -296,6 +482,21 @@ static GstFlowReturn audio_new_sample(GstAppSink *appsink, gpointer user_data)
 
 	gst_audio_info_from_caps(&audio_info, caps);
 	gst_buffer_map(buffer, &info, GST_MAP_READ);
+
+	if (data->steady) {
+		GstClockTime pts = GST_BUFFER_PTS(buffer);
+		if (pts == GST_CLOCK_TIME_NONE)
+			pts = GST_BUFFER_DTS(buffer);
+		if (pts == GST_CLOCK_TIME_NONE)
+			pts = (GstClockTime)g_get_monotonic_time() * 1000ULL;
+		if (audio_info.finfo->format == GST_AUDIO_FORMAT_F32LE)
+		steady_clock_push_audio(data->steady, (const float *)info.data,
+						info.size / audio_info.bpf,
+						audio_info.channels, audio_info.rate, pts);
+		gst_buffer_unmap(buffer, &info);
+		gst_sample_unref(sample);
+		return GST_FLOW_OK;
+	}
 
 	struct obs_source_audio audio = {};
 
@@ -367,6 +568,7 @@ static GstFlowReturn audio_new_sample(GstAppSink *appsink, gpointer user_data)
 
 const char *gstreamer_source_get_name(void *type_data)
 {
+	(void)type_data;
 	return "GStreamer Source";
 }
 
@@ -383,7 +585,7 @@ enum obs_media_state gstreamer_source_get_state(void *user_data)
 int64_t gstreamer_source_get_time(void *user_data)
 {
 	data_t *data = user_data;
-	int64_t position;
+	gint64 position;
 
 	if (!data->pipe)
 		return 0;
@@ -398,7 +600,7 @@ int64_t gstreamer_source_get_time(void *user_data)
 int64_t gstreamer_source_get_duration(void *user_data)
 {
 	data_t *data = user_data;
-	int64_t duration;
+	gint64 duration;
 
 	if (!data->pipe)
 		return 0;
@@ -529,7 +731,24 @@ static void create_pipeline(data_t *data)
 	data->seek_pos_pending = -1;
 	data->buffering = false;
 
-	gchar *pipeline = g_strdup_printf(
+	struct obs_audio_info audio_info = {0};
+	unsigned output_rate = 48000;
+	if (obs_get_audio_info(&audio_info) && audio_info.samples_per_sec > 0)
+		output_rate = audio_info.samples_per_sec;
+
+	gchar *pipeline;
+	if (steady_clock_enabled(data)) {
+		pipeline = g_strdup_printf(
+#ifdef GST_VIDEO_FORMAT_I420_10LE
+			"videoconvert name=video ! video/x-raw, format={I420,NV12,BGRA,BGRx,RGBx,RGBA,YUY2,YVYU,UYVY,I420_10LE,P010_10LE,I420_12LE,Y444_12LE} ! appsink name=video_appsink sync=false async=false max-buffers=2 drop=false "
+#else
+			"videoconvert name=video ! video/x-raw, format={I420,NV12,BGRA,BGRx,RGBx,RGBA,YUY2,YVYU,UYVY} ! appsink name=video_appsink sync=false async=false max-buffers=2 drop=false "
+#endif
+			"audioconvert name=audio ! audioresample ! audio/x-raw, format=F32LE, rate=%u, channels={1,2,3,4,5,6,8}, layout=interleaved ! appsink name=audio_appsink sync=false async=false max-buffers=2 drop=false "
+			"%s",
+			output_rate, obs_data_get_string(data->settings, "pipeline"));
+	} else {
+		pipeline = g_strdup_printf(
 #ifdef GST_VIDEO_FORMAT_I420_10LE
 		"videoconvert name=video ! video/x-raw, format={I420,NV12,BGRA,BGRx,RGBx,RGBA,YUY2,YVYU,UYVY,I420_10LE,P010_10LE,I420_12LE,Y444_12LE} ! appsink name=video_appsink "
 #else
@@ -538,7 +757,7 @@ static void create_pipeline(data_t *data)
 		"audioconvert name=audio ! audioresample ! audio/x-raw, format={U8,S16LE,S32LE,F32LE}, channels={1,2,3,4,5,6,8}, layout=interleaved ! appsink name=audio_appsink "
 		"%s",
 		obs_data_get_string(data->settings, "pipeline"));
-
+	}
 	data->pipe = gst_parse_launch(pipeline, &err);
 	g_free(pipeline);
 	if (err != NULL) {
@@ -553,21 +772,26 @@ static void create_pipeline(data_t *data)
 		return;
 	}
 
-	GstAppSinkCallbacks video_cbs = {NULL, NULL, video_new_sample};
+	GstAppSinkCallbacks video_cbs = {0};
+	video_cbs.new_sample = video_new_sample;
 
 	GstElement *appsink = gst_bin_get_by_name(GST_BIN(data->pipe), "video_appsink");
 	gst_app_sink_set_callbacks(GST_APP_SINK(appsink), &video_cbs, data, NULL);
 
-	if (!obs_data_get_bool(data->settings, "sync_appsink_video"))
+	if (steady_clock_enabled(data) ||
+	    !obs_data_get_bool(data->settings, "sync_appsink_video"))
 		g_object_set(appsink, "sync", FALSE, NULL);
 
-	if (obs_data_get_bool(data->settings, "disable_async_appsink_video"))
+	if (steady_clock_enabled(data) ||
+	    obs_data_get_bool(data->settings, "disable_async_appsink_video"))
 		g_object_set(appsink, "async", FALSE, NULL);
 
-	if (obs_data_get_bool(data->settings, "block_video"))
+	if (steady_clock_enabled(data))
+		g_object_set(appsink, "max-buffers", 2, "drop", FALSE, NULL);
+	else if (obs_data_get_bool(data->settings, "block_video"))
 		g_object_set(appsink, "max-buffers", 1, NULL);
 
-	if (obs_data_get_bool(data->settings, "drop_video"))
+	if (!steady_clock_enabled(data) && obs_data_get_bool(data->settings, "drop_video"))
 		gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
 
 	// check if connected and remove if not
@@ -580,21 +804,26 @@ static void create_pipeline(data_t *data)
 
 	gst_object_unref(appsink);
 
-	GstAppSinkCallbacks audio_cbs = {NULL, NULL, audio_new_sample};
+	GstAppSinkCallbacks audio_cbs = {0};
+	audio_cbs.new_sample = audio_new_sample;
 
 	appsink = gst_bin_get_by_name(GST_BIN(data->pipe), "audio_appsink");
 	gst_app_sink_set_callbacks(GST_APP_SINK(appsink), &audio_cbs, data, NULL);
 
-	if (!obs_data_get_bool(data->settings, "sync_appsink_audio"))
+	if (steady_clock_enabled(data) ||
+	    !obs_data_get_bool(data->settings, "sync_appsink_audio"))
 		g_object_set(appsink, "sync", FALSE, NULL);
 
-	if (obs_data_get_bool(data->settings, "disable_async_appsink_audio"))
+	if (steady_clock_enabled(data) ||
+	    obs_data_get_bool(data->settings, "disable_async_appsink_audio"))
 		g_object_set(appsink, "async", FALSE, NULL);
 
-	if (obs_data_get_bool(data->settings, "block_audio"))
+	if (steady_clock_enabled(data))
+		g_object_set(appsink, "max-buffers", 2, "drop", FALSE, NULL);
+	else if (obs_data_get_bool(data->settings, "block_audio"))
 		g_object_set(appsink, "max-buffers", 1, NULL);
 
-	if (obs_data_get_bool(data->settings, "drop_audio"))
+	if (!steady_clock_enabled(data) && obs_data_get_bool(data->settings, "drop_audio"))
 		gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
 
 	// check if connected and remove if not
@@ -634,6 +863,9 @@ static void create_pipeline(data_t *data)
 		gint cur_latency = gst_pipeline_get_latency(GST_PIPELINE(data->pipe)) / GST_MSECOND;
 		blog(LOG_INFO, "Set latency for pipeline to %dms", cur_latency);
 	}
+
+	if (data->steady)
+		steady_clock_start(data->steady);
 }
 
 static gpointer _start(gpointer user_data)
@@ -675,16 +907,25 @@ static void start(data_t *data)
 
 void *gstreamer_source_create(obs_data_t *settings, obs_source_t *source)
 {
-	bool nobuf = obs_data_get_bool(settings, "no_buffer");
-	obs_source_set_async_unbuffered(source, nobuf);
-
 	data_t *data = g_new0(data_t, 1);
 
 	data->source = source;
 	data->settings = settings;
-
 	g_mutex_init(&data->mutex);
 	g_cond_init(&data->cond);
+
+	configure_steady_clock(data);
+	obs_source_set_async_unbuffered(source,
+		data->steady ? false : obs_data_get_bool(settings, "no_buffer"));
+	if (data->steady)
+		obs_source_set_async_decoupled(source, false);
+
+	proc_handler_add(obs_source_get_proc_handler(source),
+			"void get_steady_clock_stats(out int buffer_fill_ms, "
+			"out float output_speed, out int stream_delay_ms, "
+			"out int audio_underruns, out int clock_reanchors, "
+			"out int late_video_frames, out bool primed)",
+			gstreamer_source_get_stats, data);
 
 	if (obs_data_get_bool(settings, "stop_on_hide") == false)
 		start(data);
@@ -710,6 +951,10 @@ void gstreamer_source_destroy(void *user_data)
 	data_t *data = user_data;
 
 	stop(data);
+	if (data->steady) {
+		steady_clock_destroy(data->steady);
+		data->steady = NULL;
+	}
 
 	g_mutex_clear(&data->mutex);
 	g_cond_clear(&data->cond);
@@ -742,12 +987,17 @@ void gstreamer_source_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "drop_video", false);
 	obs_data_set_default_bool(settings, "drop_audio", false);
 	obs_data_set_default_bool(settings, "clear_on_end", true);
+	obs_data_set_default_bool(settings, "steady_clock", false);
+	obs_data_set_default_int(settings, "steady_clock_target_ms", 120);
+	obs_data_set_default_bool(settings, "steady_clock_adaptive_speed", true);
 }
 
 void gstreamer_source_update(void *data, obs_data_t *settings);
 
 static bool on_apply_clicked(obs_properties_t *props, obs_property_t *property, void *data)
 {
+	(void)props;
+	(void)property;
 	gstreamer_source_update(data, ((data_t *)data)->settings);
 
 	return false;
@@ -779,6 +1029,19 @@ obs_properties_t *gstreamer_source_get_properties(void *data)
 	obs_properties_add_bool(props, "block_audio", "Disable audio sink buffer");
 	obs_properties_add_bool(props, "drop_audio", "Drop audio when sink is not fast enough");
 	obs_properties_add_bool(props, "no_buffer", "Disable buffering in OBS");
+	prop = obs_properties_add_bool(props, "steady_clock", "Use fixed-lead steady clock");
+	obs_property_set_long_description(
+		prop,
+		"Keeps media on a fixed playout clock while leaving OBS buffering enabled. "
+		"Recommended for live SRT sources that occasionally build up delay. "
+		"While enabled, the normal appsink sync and sink drop/block options are "
+		"managed by the steady clock. Leave Disable buffering in OBS unchecked.");
+	prop = obs_properties_add_int(props, "steady_clock_target_ms", "Steady clock target buffer (ms)", 50, 1000, 10);
+	obs_property_set_long_description(
+		prop,
+		"Initial and adaptive audio buffer target. 120 ms is a good starting point for live SRT.");
+	obs_properties_add_bool(props, "steady_clock_adaptive_speed",
+				"Adapt playout speed to buffer fill");
 	prop = obs_properties_add_int(props, "latency", "Fixed latency (ms)", 0, 10000, 10);
 	obs_property_set_long_description(
 		prop,
@@ -795,18 +1058,26 @@ obs_properties_t *gstreamer_source_get_properties(void *data)
 
 void gstreamer_source_update(void *data, obs_data_t *settings)
 {
-	stop(data);
+	data_t *source_data = data;
+	stop(source_data);
+	g_mutex_lock(&source_data->mutex);
+	source_data->settings = settings;
+	configure_steady_clock(source_data);
 
-	bool nobuf = obs_data_get_bool(settings, "no_buffer");
-	obs_source_set_async_unbuffered(((data_t *)data)->source, nobuf);
+	obs_source_set_async_unbuffered(
+		source_data->source,
+		source_data->steady ? false : obs_data_get_bool(settings, "no_buffer"));
+	if (source_data->steady)
+		obs_source_set_async_decoupled(source_data->source, false);
+	g_mutex_unlock(&source_data->mutex);
 
 	// Don't start the pipeline if source is hidden and 'stop_on_hide' is set.
 	// From GUI this is probably irrelevant but works around some quirks when
 	// controlled from script.
-	if (obs_data_get_bool(settings, "stop_on_hide") && !obs_source_showing(((data_t *)data)->source))
+	if (obs_data_get_bool(settings, "stop_on_hide") && !obs_source_showing(source_data->source))
 		return;
 
-	start(data);
+	start(source_data);
 }
 
 void gstreamer_source_show(void *data)

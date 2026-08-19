@@ -1,0 +1,150 @@
+name: Windows plugin build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      obs_version:
+        description: OBS Studio version used by the build image
+        required: false
+        default: '32.2.2'
+      gstreamer_version:
+        description: GStreamer MinGW version used by the build image
+        required: false
+        default: '1.26.11'
+
+permissions:
+  contents: read
+
+env:
+  OBS_VERSION: ${{ inputs.obs_version || '32.2.2' }}
+  GSTREAMER_VERSION: ${{ inputs.gstreamer_version || '1.26.11' }}
+
+jobs:
+  timing-tests:
+    name: Steady-clock tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Linux test image
+        run: docker build -f docker/linux -t obs-gstreamer-linux-test .
+
+      - name: Run timing tests
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -w /src \
+            obs-gstreamer-linux-test \
+            bash -lc 'meson setup test-build --buildtype=debug -Dbuild_tests=true && ninja -C test-build test'
+
+  windows-build:
+    name: Windows x64 plugin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: timing-tests
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache GStreamer packages
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/gstreamer
+          key: gstreamer-mingw-x86_64-${{ env.GSTREAMER_VERSION }}
+
+      - name: Download GStreamer packages
+        run: bash docker/download-windows-deps.sh "$GSTREAMER_VERSION"
+
+      - name: Build Windows toolchain image
+        run: |
+          timeout 30m docker build \
+            --build-arg OBS_VERSION="$OBS_VERSION" \
+            --build-arg GSTREAMER_VERSION="$GSTREAMER_VERSION" \
+            -f docker/mingw \
+            -t obs-gstreamer-windows-build .
+
+      - name: Build plugin
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -w /src \
+            obs-gstreamer-windows-build \
+            bash docker/build-windows.sh
+
+      - name: Verify Windows imports
+        run: |
+          objdump -p windows/obs-gstreamer.dll | tee windows-imports.txt
+          normal_imports=$(awk '/The Import Tables/ {in_import=1} /The Delay Import/ {in_import=0} in_import' windows-imports.txt)
+          if grep -Eq 'DLL Name: (libgstreamer|libglib|libgobject|libgst)' <<<"$normal_imports"; then
+            echo "GStreamer/GLib DLL found in the normal import table" >&2
+            exit 1
+          fi
+          delay_symbols=$(nm windows/obs-gstreamer.dll)
+          for component in gstreamer glib gobject; do
+            grep -q "__DELAY_IMPORT_DESCRIPTOR_.*lib${component}" <<<"$delay_symbols"
+          done
+          grep -q '__delayLoadHelper2' <<<"$delay_symbols"
+
+      - name: GStreamer and OBS runtime smoke test
+        run: |
+          docker run --rm \
+            -e OBS_VERSION="$OBS_VERSION" \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -w /src \
+            obs-gstreamer-windows-build \
+            bash -lc '
+              test -f /bin/64bit/obs64.exe || \
+                test -f /obs-studio-${OBS_VERSION}/bin/64bit/obs64.exe || \
+                test -f /obs64.exe
+              test -f windows/obs-gstreamer.dll
+              gst_inspect=/c/gstreamer/1.0/mingw_x86_64/bin/gst-inspect-1.0.exe
+              test -f "$gst_inspect"
+              for dll in \
+                libgstreamer-1.0-0.dll \
+                libglib-2.0-0.dll \
+                libgobject-2.0-0.dll; do
+                test -f "/c/gstreamer/1.0/mingw_x86_64/bin/$dll"
+                objdump -p "$gst_inspect" | grep -q "DLL Name: $dll"
+              done
+              timeout 30s env WINEDEBUG=-all wine cmd /c exit 0
+            '
+
+      - name: Package plugin
+        run: |
+          mkdir -p package/obs-gstreamer/bin/64bit
+          cp windows/obs-gstreamer.dll package/obs-gstreamer/bin/64bit/
+          cp README.md LICENSE package/obs-gstreamer/
+          cp windows/obs-gstreamer.dll obs-gstreamer-windows-x64.dll
+          (cd package && zip -r ../obs-gstreamer-windows-x64.zip obs-gstreamer)
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-gstreamer-windows-x64-${{ github.sha }}
+          path: obs-gstreamer-windows-x64.zip
+
+      - name: Upload raw DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-gstreamer-windows-dll-${{ github.sha }}
+          path: obs-gstreamer-windows-x64.dll
+
+  release:
+    name: Draft GitHub release
+    runs-on: ubuntu-24.04
+    needs: windows-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: obs-gstreamer-windows-x64-${{ github.sha }}
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" obs-gstreamer-windows-x64.zip --generate-notes

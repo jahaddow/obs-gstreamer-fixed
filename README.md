@@ -20,9 +20,11 @@ This may be handy to quickly get some simple filters in but also complex pipelin
 Prebuilt
 ---
 
-Experimental prebuilt 64-bit Windows plugin is available. You still require the
-official [GStreamer run-time] (MinGW version) to be installed. Make sure the
-run-time `bin` path is added to Windows's `PATH` environment.
+Experimental prebuilt 64-bit Windows plugin is available for current OBS
+releases, including OBS 32.2 and later. You still require the official
+[GStreamer run-time] (MinGW version) to be installed. The plugin locates the
+runtime using the environment variables created by the GStreamer installer;
+adding its `bin` directory to `PATH` is not required.
 
 Experimental prebuilt macOS plugin available. You still require the GStreamer
 run-time installed via [Macports] (not Homebrew).
@@ -43,6 +45,24 @@ flatpak install com.obsproject.Studio.Plugin.Gstreamer
 [OBS Studio]: https://obsproject.com/
 [GStreamer run-time]: https://gstreamer.freedesktop.org/data/pkg/windows/
 [Macports]: https://www.macports.org/
+
+Windows installation
+---
+
+Install the official 64-bit MinGW GStreamer runtime first. Extract the Windows
+plugin ZIP into:
+
+    C:\ProgramData\obs-studio\plugins
+
+The resulting plugin path must be:
+
+    C:\ProgramData\obs-studio\plugins\obs-gstreamer\bin\64bit\obs-gstreamer.dll
+
+Restart OBS after installing it. Do not install the standalone DLL into the
+plugin manager or leave the ZIP's `package` directory in the path. Portable OBS
+uses its portable `plugins` directory instead. The runtime installer normally
+creates `GSTREAMER_1_0_ROOT_MINGW_X86_64`, which the plugin uses to locate the
+GStreamer `bin` and `lib\gstreamer-1.0` directories.
 
 Usage
 ---
@@ -92,6 +112,46 @@ Linux webcam example with watchdog (automatically restarts the pipeline if the w
 
 If you don't understand what is happening in these lines please check the
 GStreamer documentation as mentioned above!
+
+Steady clock for live sources
+---
+
+The GStreamer source normally passes pipeline timestamps directly to OBS. For
+live SRT feeds, temporary receiver or decoder stalls can make that input fall
+behind the OBS mixer. OBS then has to buffer the late source, which can appear
+as a delay that grows by up to a second.
+
+Enable **Use fixed-lead steady clock** for live sources where this occurs. It
+keeps normal OBS buffering enabled, primes approximately 120 ms of decoded
+audio, and emits audio on a monotonic clock with a small fixed lead. The audio
+clock is also used to map video timestamps, so video and audio remain aligned.
+
+Recommended starting settings:
+
+* Use pipeline timestamps: enabled.
+* Use fixed-lead steady clock: enabled.
+* Steady clock target buffer: `120 ms`.
+* Adapt playout speed to buffer fill: enabled.
+* Disable buffering in OBS: disabled.
+
+Correction is bounded to `0.98x`–`1.05x` with a 20 ms deadband. During a
+severe input stall the source emits short faded silence and re-anchors the
+playout clock once. For diagnostics, the source proc handler exposes
+`get_steady_clock_stats` with buffer fill, correction speed, estimated stream
+delay, priming state, underruns, re-anchors, and late video frames.
+
+The steady clock is intentionally opt-in. Existing sources keep their
+previous behavior when it is disabled.
+
+If delay still grows, inspect the pipeline's own buffering. A bare GStreamer
+`queue` can buffer up to one second by default. As a diagnostic, try an
+explicit bounded queue, for example:
+
+    queue max-size-time=200000000 max-size-buffers=0 max-size-bytes=0 leaky=downstream
+
+Use a leaky queue only where dropping old video is acceptable. Do not use it on
+audio when preserving the audio timeline is more important than hard-capping
+latency.
 
 
 Build
