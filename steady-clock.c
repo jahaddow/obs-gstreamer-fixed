@@ -332,6 +332,7 @@ static void output_audio_locked(steady_clock_t *clock, uint64_t now_ns)
 			clock->next_audio_ns = clock->output_anchor_ns;
 			clock->latest_input_audio_end_ns = 0;
 			clock->latest_output_audio_end_ns = 0;
+			clock->video_anchor_valid = false;
 			clock->stall_reanchored = true;
 		}
 	}
